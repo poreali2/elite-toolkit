@@ -225,15 +225,15 @@ app.get("/api/stream", async (req, res) => {
   );
 
   const args = [
-    "-f",
-    format || "best",
-    "--no-playlist",
-    "--no-warnings",
-    "--ignore-errors",
-    "-o",
-    "-",
-    decodedUrl,
-  ];
+  "--no-playlist",
+  "--no-warnings",
+  "--ignore-errors",
+  "-f",
+  format && format !== "undefined" ? format : "bv*+ba/b",
+  "-o",
+  "-",
+  decodedUrl,
+];
 
   const ytdlp = spawn("yt-dlp", args);
 
