@@ -14,15 +14,31 @@ const PORT = process.env.PORT || 3001;
 /* ================= RAILWAY FIX ================= */
 app.set("trust proxy", 1);
 
-/* ================= CORS ================= */
-const ALLOWED_ORIGINS = [
-  process.env.FRONTEND_URL || "http://localhost:8080",
+/* ================= CORS FIX ================= */
+const allowedOrigins = [
+  "https://elite-toolkit.vercel.app",
   "http://localhost:5173",
   "http://localhost:8080",
-  "https://elite-toolkit.vercel.app",
 ];
 
-/* ================= SUPPORTED HOSTS ================= */
+app.use(
+  cors({
+    origin: (origin, cb) => {
+      if (!origin) return cb(null, true);
+      if (allowedOrigins.includes(origin)) return cb(null, true);
+      return cb(null, true); // لا تكسر الطلبات
+    },
+    methods: ["GET", "POST", "OPTIONS"],
+    allowedHeaders: ["Content-Type"],
+  })
+);
+
+/* مهم جداً لـ preflight */
+app.options("*", cors());
+
+app.use(express.json({ limit: "2mb" }));
+
+/* ================= HOSTS ================= */
 const SUPPORTED_HOSTS = [
   "youtube.com",
   "www.youtube.com",
@@ -35,16 +51,13 @@ const SUPPORTED_HOSTS = [
   "www.instagram.com",
 ];
 
-/* ================= HELPERS ================= */
 function isValidVideoUrl(url) {
   try {
-    const parsed = new URL(url);
-    if (!["http:", "https:"].includes(parsed.protocol)) return false;
+    const u = new URL(url);
+    if (!["http:", "https:"].includes(u.protocol)) return false;
 
     return SUPPORTED_HOSTS.some(
-      (host) =>
-        parsed.hostname === host ||
-        parsed.hostname.endsWith("." + host)
+      (h) => u.hostname === h || u.hostname.endsWith("." + h)
     );
   } catch {
     return false;
@@ -54,57 +67,27 @@ function isValidVideoUrl(url) {
 function sanitizeFilename(name) {
   return (name || "download")
     .replace(/[^\w\s.\-]/g, "_")
-    .trim()
     .slice(0, 200);
 }
 
-/* ================= RATE LIMIT SAFE ================= */
-const downloadLimiter = rateLimit({
+/* ================= RATE LIMIT ================= */
+const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 20,
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: (req) => req.ip,
-  handler: (req, res) => {
-    return res.status(429).json({
-      error: "Too many requests, try later",
-    });
-  },
 });
 
-/* ================= MIDDLEWARE ================= */
-app.use(
-  cors({
-    origin: function (origin, callback) {
-      const allowed = [
-        "https://elite-toolkit.vercel.app",
-        "http://localhost:5173",
-        "http://localhost:8080",
-      ];
+app.use("/api", limiter);
 
-      if (!origin || allowed.includes(origin)) {
-        callback(null, true);
-      } else {
-        callback(new Error("Not allowed by CORS"));
-      }
-    },
-    methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Content-Type"],
-    credentials: true,
-  })
-);
-
-app.use(express.json({ limit: "2mb" }));
-
-/* ================= DOWNLOAD API ================= */
-app.post("/api/download", downloadLimiter, async (req, res) => {
+/* ================= DOWNLOAD ================= */
+app.post("/api/download", async (req, res) => {
   const { url, type } = req.body;
 
-  if (!url) {
-    return res.status(400).json({ error: "URL required" });
-  }
+  if (!url) return res.status(400).json({ error: "URL required" });
 
-  const cleanUrl = url.trim().slice(0, 2048);
+  const cleanUrl = url.trim();
 
   if (!isValidVideoUrl(cleanUrl)) {
     return res.status(400).json({ error: "Unsupported URL" });
@@ -113,80 +96,54 @@ app.post("/api/download", downloadLimiter, async (req, res) => {
   try {
     console.log("[DOWNLOAD]", cleanUrl);
 
-    const cookiePath = "/tmp/cookies.txt";
-
-    if (process.env.YT_COOKIES) {
-      fs.writeFileSync(cookiePath, process.env.YT_COOKIES);
-    }
-
-    const cookieArg = process.env.YT_COOKIES
-      ? `--cookies ${cookiePath}`
-      : "";
-
-    /* ================= SAFE YT-DLP ================= */
-    const command = `yt-dlp ${cookieArg} --dump-json --no-playlist --no-warnings --ignore-errors --extractor-args "youtube:player_client=android" "${cleanUrl}"`;
+    const command =
+      `yt-dlp --no-playlist --no-warnings --ignore-errors ` +
+      `--extractor-args "youtube:player_client=android" ` +
+      `--dump-json "${cleanUrl}"`;
 
     const { stdout } = await execAsync(command, {
       timeout: 60000,
       maxBuffer: 10 * 1024 * 1024,
     });
 
-    if (!stdout) {
-      throw new Error("Empty yt-dlp response");
-    }
+    if (!stdout) throw new Error("Empty response");
 
     let info;
-
     try {
       info = JSON.parse(stdout);
-    } catch (e) {
-      console.error("[YT-DLP RAW]", stdout);
-      return res.status(500).json({
-        error: "Failed to parse yt-dlp output",
-      });
+    } catch {
+      return res.status(500).json({ error: "yt-dlp parse error" });
     }
 
     const formats = [];
 
-    /* ================= MP3 ================= */
+    /* MP3 */
     if (type === "mp3") {
       formats.push({
         type: "mp3",
         quality: "audio",
         label: "Best Audio",
-        url: `/api/stream?url=${encodeURIComponent(cleanUrl)}&format=bestaudio&title=${encodeURIComponent(info.title || "audio")}&ext=mp3`,
+        url: `/api/stream?url=${encodeURIComponent(
+          cleanUrl
+        )}&format=bestaudio/best&title=${encodeURIComponent(
+          info.title || "audio"
+        )}&ext=mp3`,
       });
     }
 
-    /* ================= VIDEO ================= */
+    /* VIDEO */
     else {
-      const targetHeights = [1080, 720, 480, 360];
+      const heights = [1080, 720, 480, 360];
 
-      const available = new Set(
-        (info.formats || [])
-          .filter((f) => f.vcodec !== "none" && f.height)
-          .map((f) => f.height)
-      );
-
-      for (const h of targetHeights) {
-        const match = [...available].find(
-          (a) => a <= h && a >= h - 20
-        );
-
-        if (match) {
-          formats.push({
-            quality: `${h}p`,
-            label: h >= 1080 ? "Full HD" : h >= 720 ? "HD" : "SD",
-            url: `/api/stream?url=${encodeURIComponent(cleanUrl)}&format=bestvideo[height<=${h}]+bestaudio&title=${encodeURIComponent(info.title || "video")}&ext=mp4`,
-          });
-        }
-      }
-
-      if (!formats.length) {
+      for (const h of heights) {
         formats.push({
-          quality: "best",
-          label: "Auto",
-          url: `/api/stream?url=${encodeURIComponent(cleanUrl)}&format=best`,
+          quality: `${h}p`,
+          label: h >= 1080 ? "Full HD" : h >= 720 ? "HD" : "SD",
+          url: `/api/stream?url=${encodeURIComponent(
+            cleanUrl
+          )}&format=best&title=${encodeURIComponent(
+            info.title || "video"
+          )}&ext=mp4`,
         });
       }
     }
@@ -201,7 +158,6 @@ app.post("/api/download", downloadLimiter, async (req, res) => {
     });
   } catch (err) {
     console.error("[DOWNLOAD ERROR]", err.message);
-
     return res.status(500).json({
       error: "Failed to process video",
       detail: err.message,
@@ -209,18 +165,16 @@ app.post("/api/download", downloadLimiter, async (req, res) => {
   }
 });
 
-/* ================= STREAM API ================= */
-app.get("/api/stream", async (req, res) => {
+/* ================= STREAM ================= */
+app.get("/api/stream", (req, res) => {
   try {
-    const { url, format, title, ext } = req.query;
+    const { url, title, ext, format } = req.query;
 
-    if (!url) {
-      return res.status(400).json({ error: "URL required" });
-    }
+    if (!url) return res.status(400).json({ error: "URL required" });
 
-    const decodedUrl = decodeURIComponent(url);
+    const decoded = decodeURIComponent(url);
 
-    if (!isValidVideoUrl(decodedUrl)) {
+    if (!isValidVideoUrl(decoded)) {
       return res.status(400).json({ error: "Invalid URL" });
     }
 
@@ -239,10 +193,10 @@ app.get("/api/stream", async (req, res) => {
       "--no-warnings",
       "--ignore-errors",
       "-f",
-      format && format !== "undefined" ? format : "bv*+ba/b",
+      format || "bv*+ba/b",
       "-o",
       "-",
-      decodedUrl,
+      decoded,
     ];
 
     console.log("[STREAM]", args.join(" "));
@@ -252,7 +206,7 @@ app.get("/api/stream", async (req, res) => {
     ytdlp.stdout.pipe(res);
 
     ytdlp.stderr.on("data", (d) => {
-      console.error("[yt-dlp]", d.toString());
+      console.log("[yt-dlp]", d.toString());
     });
 
     ytdlp.on("error", (err) => {
@@ -267,4 +221,13 @@ app.get("/api/stream", async (req, res) => {
     console.error("[STREAM FATAL]", e);
     res.status(500).json({ error: "Internal error" });
   }
+});
+
+/* ================= HEALTH ================= */
+app.get("/api/health", (_req, res) => {
+  res.json({ status: "ok" });
+});
+
+app.listen(PORT, () => {
+  console.log("🚀 Server running on", PORT);
 });
