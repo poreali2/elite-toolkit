@@ -48,6 +48,8 @@ const ToolPage = () => {
   const [searchParams] = useSearchParams();
   const tool = tools.find((t) => t.slug === slug);
 
+  const API_BASE = import.meta.env.VITE_API_URL || "";
+
   const [input, setInput] = useState(searchParams.get("url") || "");
   const [state, setState] = useState<ProcessingState>("idle");
   const [errorMessage, setErrorMessage] = useState("");
@@ -74,7 +76,7 @@ const ToolPage = () => {
     setResult(null);
 
     try {
-      const response = await fetch("/api/download", {
+      const response = await fetch(`${API_BASE}/api/download`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -106,7 +108,7 @@ const ToolPage = () => {
   };
 
   const handleCopyLink = (url: string) => {
-    const fullUrl = `${window.location.origin}${url}`;
+    const fullUrl = API_BASE ? `${API_BASE}${url}` : `${window.location.origin}${url}`;
     navigator.clipboard.writeText(fullUrl);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
@@ -423,7 +425,7 @@ const ToolPage = () => {
                             )}
                           </Button>
                           <a
-                            href={fmt.url}
+                            href={`${API_BASE}${fmt.url}`}
                             download
                             className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg gradient-primary text-primary-foreground hover-glow transition-all"
                           >
