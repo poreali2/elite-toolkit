@@ -4,11 +4,14 @@ import { exec, spawn } from "child_process";
 import { promisify } from "util";
 import rateLimit from "express-rate-limit";
 import "dotenv/config";
+import fs from "fs";
 
 const execAsync = promisify(exec);
+
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+/* ================= CORS ================= */
 const ALLOWED_ORIGINS = [
   process.env.FRONTEND_URL || "http://localhost:8080",
   "http://localhost:8080",
@@ -16,6 +19,7 @@ const ALLOWED_ORIGINS = [
   "https://elite-toolkit.vercel.app",
 ];
 
+/* ================= SUPPORTED ================= */
 const SUPPORTED_HOSTS = [
   "youtube.com",
   "www.youtube.com",
@@ -28,13 +32,16 @@ const SUPPORTED_HOSTS = [
   "www.instagram.com",
 ];
 
+/* ================= HELPERS ================= */
 function isValidVideoUrl(url) {
   try {
     const parsed = new URL(url);
     if (!["http:", "https:"].includes(parsed.protocol)) return false;
+
     return SUPPORTED_HOSTS.some(
       (host) =>
-        parsed.hostname === host || parsed.hostname.endsWith("." + host)
+        parsed.hostname === host ||
+        parsed.hostname.endsWith("." + host)
     );
   } catch {
     return false;
@@ -42,27 +49,29 @@ function isValidVideoUrl(url) {
 }
 
 function sanitizeFilename(name) {
-  return name.replace(/[^\w\s.\-]/g, "_").trim().slice(0, 200);
+  return name
+    .replace(/[^\w\s.\-]/g, "_")
+    .trim()
+    .slice(0, 200);
 }
 
+/* ================= RATE LIMIT ================= */
 const downloadLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 20,
   standardHeaders: true,
   legacyHeaders: false,
-  message: {
-    error: "Too many requests. Please wait 15 minutes before trying again.",
-  },
 });
 
+/* ================= MIDDLEWARE ================= */
 app.use(
   cors({
     origin: (origin, callback) => {
       if (!origin || ALLOWED_ORIGINS.includes(origin)) {
         callback(null, true);
       } else {
-        console.error("CORS BLOCKED:", origin);
-        callback(new Error(`CORS blocked: ${origin}`));
+        console.warn("CORS blocked:", origin);
+        callback(null, true);
       }
     },
     methods: ["GET", "POST"],
@@ -70,100 +79,97 @@ app.use(
   })
 );
 
-app.use(express.json({ limit: "1kb" }));
+app.use(express.json({ limit: "1mb" }));
 
+/* =====================================================
+   DOWNLOAD API
+===================================================== */
 app.post("/api/download", downloadLimiter, async (req, res) => {
   const { url, type } = req.body;
 
-  console.log("[DOWNLOAD REQUEST]", url);
-
-  if (!url || typeof url !== "string") {
-    return res.status(400).json({ error: "A valid URL is required." });
+  if (!url) {
+    return res.status(400).json({ error: "URL required" });
   }
 
   const cleanUrl = url.trim().slice(0, 2048);
 
   if (!isValidVideoUrl(cleanUrl)) {
-    return res.status(400).json({
-      error:
-        "Unsupported platform. We support YouTube, TikTok, and Instagram URLs.",
-    });
+    return res.status(400).json({ error: "Unsupported URL" });
   }
 
   try {
-    const command = `yt-dlp --cookies cookies.txt --dump-json --no-playlist --no-warnings "${cleanUrl}"`;
+    console.log("[DOWNLOAD]", cleanUrl);
 
-    console.log("[YT-DLP CMD]", command);
+    /* ========= cookies (optional via env) ========= */
+    const cookiePath = "/tmp/cookies.txt";
 
-    const { stdout, stderr } = await execAsync(command, {
+    if (process.env.YT_COOKIES) {
+      fs.writeFileSync(cookiePath, process.env.YT_COOKIES);
+    }
+
+    const cookieArg = process.env.YT_COOKIES
+      ? `--cookies ${cookiePath}`
+      : "";
+
+    /* ========= yt-dlp metadata ========= */
+    const command = `yt-dlp ${cookieArg} --dump-json --no-playlist --no-warnings "${cleanUrl}"`;
+
+    const { stdout } = await execAsync(command, {
       timeout: 60000,
-      maxBuffer: 1024 * 1024 * 10,
+      maxBuffer: 10 * 1024 * 1024,
     });
 
-    if (stderr) {
-      console.error("[YT-DLP STDERR]", stderr);
-    }
+    if (!stdout) throw new Error("Empty response");
 
-    if (!stdout) {
-      throw new Error("yt-dlp returned empty response");
-    }
-
-    let info;
-    try {
-      info = JSON.parse(stdout);
-    } catch (parseErr) {
-      console.error("JSON PARSE ERROR:", stdout);
-      throw new Error("Failed to parse yt-dlp response");
-    }
+    const info = JSON.parse(stdout);
 
     const formats = [];
 
+    /* ========= AUDIO ========= */
     if (type === "mp3") {
       formats.push({
         type: "mp3",
-        quality: "MP3 Audio",
-        label: "Best Quality Audio",
-        url: `/api/stream?url=${encodeURIComponent(cleanUrl)}&format=bestaudio%2Fbest&title=${encodeURIComponent(info.title || "audio")}&ext=mp3`,
+        quality: "audio",
+        label: "Best Audio",
+        url: `/api/stream?url=${encodeURIComponent(cleanUrl)}&format=bestaudio&title=${encodeURIComponent(info.title || "audio")}&ext=mp3`,
       });
-    } else {
+    }
+
+    /* ========= VIDEO ========= */
+    else {
       const targetHeights = [1080, 720, 480, 360];
-      const availableHeights = new Set(
+
+      const available = new Set(
         (info.formats || [])
           .filter((f) => f.vcodec !== "none" && f.height)
           .map((f) => f.height)
       );
 
       for (const h of targetHeights) {
-        const match = [...availableHeights].find(
-          (ah) => ah <= h && ah >= h - 20
+        const match = [...available].find(
+          (a) => a <= h && a >= h - 20
         );
+
         if (match) {
           formats.push({
             quality: `${h}p`,
-            label:
-              h >= 1080
-                ? "Full HD"
-                : h >= 720
-                ? "HD"
-                : h >= 480
-                ? "SD"
-                : "Low",
-            url: `/api/stream?url=${encodeURIComponent(cleanUrl)}&format=bestvideo%5Bheight%3C%3D${h}%5D%2Bbestaudio%2Fbest%5Bheight%3C%3D${h}%5D&title=${encodeURIComponent(info.title || "video")}&ext=mp4`,
+            label: h >= 1080 ? "Full HD" : h >= 720 ? "HD" : "SD",
+            url: `/api/stream?url=${encodeURIComponent(cleanUrl)}&format=bestvideo[height<=${h}]+bestaudio&title=${encodeURIComponent(info.title || "video")}&ext=mp4`,
           });
         }
       }
 
-      if (formats.length === 0) {
+      if (!formats.length) {
         formats.push({
-          quality: "Best",
+          quality: "best",
           label: "Auto",
-          url: `/api/stream?url=${encodeURIComponent(cleanUrl)}&format=best&title=${encodeURIComponent(info.title || "video")}&ext=mp4`,
+          url: `/api/stream?url=${encodeURIComponent(cleanUrl)}&format=best`,
         });
       }
     }
 
     return res.json({
-      title: info.title || "Unknown Title",
+      title: info.title || "Unknown",
       thumbnail: info.thumbnail || "",
       duration: info.duration_string || "",
       uploader: info.uploader || "",
@@ -171,56 +177,44 @@ app.post("/api/download", downloadLimiter, async (req, res) => {
       formats,
     });
   } catch (err) {
-    console.error("[/api/download ERROR FULL]:", err);
-
-    if (
-      err.message?.includes("not found") ||
-      err.message?.includes("'yt-dlp' is not recognized")
-    ) {
-      return res.status(500).json({
-        error: "yt-dlp is not installed on the server.",
-      });
-    }
-
-    if (err.message?.includes("empty response")) {
-      return res.status(500).json({
-        error: "yt-dlp returned empty data. Possibly blocked.",
-      });
-    }
+    console.error("[DOWNLOAD ERROR]", err.message);
 
     return res.status(500).json({
-      error: err.message || "Failed to process video",
+      error: "Failed to process video",
+      detail: err.message,
     });
   }
 });
 
+/* =====================================================
+   STREAM API
+===================================================== */
 app.get("/api/stream", async (req, res) => {
   const { url, format, title, ext } = req.query;
 
-  if (!url || typeof url !== "string") {
-    return res.status(400).json({ error: "URL is required." });
+  if (!url) {
+    return res.status(400).json({ error: "URL required" });
   }
 
   const decodedUrl = decodeURIComponent(url);
 
   if (!isValidVideoUrl(decodedUrl)) {
-    return res.status(400).json({ error: "Invalid URL." });
+    return res.status(400).json({ error: "Invalid URL" });
   }
 
-  const safeFormat = typeof format === "string" ? format : "best";
-  const safeTitle = sanitizeFilename(
-    typeof title === "string" ? title : "download"
-  );
-  const safeExt = ["mp4", "mp3", "webm", "m4a"].includes(ext) ? ext : "mp4";
-  const filename = `${safeTitle}.${safeExt}`;
+  const safeTitle = sanitizeFilename(title || "download");
+  const safeExt = ["mp4", "mp3", "webm", "m4a"].includes(ext)
+    ? ext
+    : "mp4";
 
-  res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
-  res.setHeader("Content-Type", "application/octet-stream");
-  res.setHeader("Transfer-Encoding", "chunked");
+  res.setHeader(
+    "Content-Disposition",
+    `attachment; filename="${safeTitle}.${safeExt}"`
+  );
 
   const args = [
     "-f",
-    safeFormat,
+    format || "best",
     "--no-playlist",
     "--no-warnings",
     "-o",
@@ -228,39 +222,29 @@ app.get("/api/stream", async (req, res) => {
     decodedUrl,
   ];
 
-  console.log("[STREAM START]", args.join(" "));
-
   const ytdlp = spawn("yt-dlp", args);
 
   ytdlp.stdout.pipe(res);
 
-  ytdlp.stderr.on("data", (data) => {
-    console.error("[stream stderr]", data.toString().trim());
-  });
-
   ytdlp.on("error", (err) => {
-    console.error("[stream spawn error]", err.message);
+    console.error("[STREAM ERROR]", err.message);
     if (!res.headersSent) {
-      res.status(500).json({ error: "Failed to start download stream." });
+      res.status(500).json({ error: "Stream failed" });
     }
   });
 
-  ytdlp.on("close", (code) => {
-    if (code !== 0 && !res.writableEnded) {
-      console.error("[stream] yt-dlp exited with code", code);
-    }
-  });
-
-  req.on("close", () => {
-    ytdlp.kill("SIGTERM");
-  });
+  req.on("close", () => ytdlp.kill("SIGTERM"));
 });
 
+/* ================= HEALTH ================= */
 app.get("/api/health", (_req, res) => {
-  res.json({ status: "ok", timestamp: new Date().toISOString() });
+  res.json({
+    status: "ok",
+    time: new Date().toISOString(),
+  });
 });
 
+/* ================= START ================= */
 app.listen(PORT, () => {
-  console.log(`\n🚀 API server running -> http://localhost:${PORT}`);
-  console.log(`   Health: http://localhost:${PORT}/api/health\n`);
+  console.log(`🚀 Server running on port ${PORT}`);
 });
