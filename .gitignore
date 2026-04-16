@@ -12,6 +12,10 @@ dist
 dist-ssr
 *.local
 
+# Bun lockfiles (using npm instead)
+bun.lock
+bun.lockb
+
 # Environment secrets - NEVER commit these
 .env
 .env.*
