@@ -202,62 +202,60 @@ app.post("/api/download", downloadLimiter, async (req, res) => {
 
 /* ================= STREAM API ================= */
 app.get("/api/stream", async (req, res) => {
-  const { url, format, title, ext } = req.query;
+  try {
+    const { url, format, title, ext } = req.query;
 
-  if (!url) {
-    return res.status(400).json({ error: "URL required" });
-  }
-
-  const decodedUrl = decodeURIComponent(url);
-
-  if (!isValidVideoUrl(decodedUrl)) {
-    return res.status(400).json({ error: "Invalid URL" });
-  }
-
-  const safeTitle = sanitizeFilename(title);
-  const safeExt = ["mp4", "mp3", "webm", "m4a"].includes(ext)
-    ? ext
-    : "mp4";
-
-  res.setHeader(
-    "Content-Disposition",
-    `attachment; filename="${safeTitle}.${safeExt}"`
-  );
-
-  const args = [
-  "--no-playlist",
-  "--no-warnings",
-  "--ignore-errors",
-  "-f",
-  format && format !== "undefined" ? format : "bv*+ba/b",
-  "-o",
-  "-",
-  decodedUrl,
-];
-
-  const ytdlp = spawn("yt-dlp", args);
-
-  ytdlp.stdout.pipe(res);
-
-  ytdlp.on("error", (err) => {
-    console.error("[STREAM ERROR]", err.message);
-    if (!res.headersSent) {
-      res.status(500).json({ error: "Stream failed" });
+    if (!url) {
+      return res.status(400).json({ error: "URL required" });
     }
-  });
 
-  req.on("close", () => ytdlp.kill("SIGTERM"));
-});
+    const decodedUrl = decodeURIComponent(url);
 
-/* ================= HEALTH ================= */
-app.get("/api/health", (_req, res) => {
-  res.json({
-    status: "ok",
-    time: new Date().toISOString(),
-  });
-});
+    if (!isValidVideoUrl(decodedUrl)) {
+      return res.status(400).json({ error: "Invalid URL" });
+    }
 
-/* ================= START ================= */
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+    const safeTitle = sanitizeFilename(title || "download");
+    const safeExt = ["mp4", "mp3", "webm", "m4a"].includes(ext)
+      ? ext
+      : "mp4";
+
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${safeTitle}.${safeExt}"`
+    );
+
+    const args = [
+      "--no-playlist",
+      "--no-warnings",
+      "--ignore-errors",
+      "-f",
+      format && format !== "undefined" ? format : "bv*+ba/b",
+      "-o",
+      "-",
+      decodedUrl,
+    ];
+
+    console.log("[STREAM]", args.join(" "));
+
+    const ytdlp = spawn("yt-dlp", args);
+
+    ytdlp.stdout.pipe(res);
+
+    ytdlp.stderr.on("data", (d) => {
+      console.error("[yt-dlp]", d.toString());
+    });
+
+    ytdlp.on("error", (err) => {
+      console.error("[STREAM ERROR]", err.message);
+      if (!res.headersSent) {
+        res.status(500).json({ error: "Stream failed" });
+      }
+    });
+
+    req.on("close", () => ytdlp.kill("SIGTERM"));
+  } catch (e) {
+    console.error("[STREAM FATAL]", e);
+    res.status(500).json({ error: "Internal error" });
+  }
 });
