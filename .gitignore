@@ -1,0 +1,40 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Bun lockfiles (using npm instead)
+bun.lock
+bun.lockb
+
+# Environment secrets - NEVER commit these
+.env
+.env.local
+.env.development.local
+.env.test.local
+!.env.production
+!.env.example
+server/.env
+
+# Server dependencies (installed separately on server)
+server/node_modules
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
