@@ -12,6 +12,7 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 
 /* ================= RAILWAY FIX ================= */
+// مهم جداً لأن Railway يعمل خلف Proxy
 app.set("trust proxy", 1);
 
 /* ================= CORS FIX ================= */
@@ -23,17 +24,22 @@ const allowedOrigins = [
 
 app.use(
   cors({
-    origin: (origin, cb) => {
-      if (!origin) return cb(null, true);
-      if (allowedOrigins.includes(origin)) return cb(null, true);
-      return cb(null, true); // لا تكسر الطلبات
+    origin: function (origin, callback) {
+      // السماح بالطلبات التي ليس لها origin (مثل تطبيقات الموبايل أو curl)
+      if (!origin) return callback(null, true);
+      if (allowedOrigins.indexOf(origin) !== -1) {
+        callback(null, true);
+      } else {
+        callback(new Error("Not allowed by CORS"));
+      }
     },
     methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Content-Type"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+    credentials: true,
   })
 );
 
-/* مهم جداً لـ preflight */
+/* معالجة طلبات Preflight لجميع المسارات */
 app.options("*", cors());
 
 app.use(express.json({ limit: "2mb" }));
@@ -73,7 +79,7 @@ function sanitizeFilename(name) {
 /* ================= RATE LIMIT ================= */
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 20,
+  max: 50, // رفعتها قليلاً لتجنب الحظر السريع أثناء التجارب
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: (req) => req.ip,
@@ -94,11 +100,12 @@ app.post("/api/download", async (req, res) => {
   }
 
   try {
-    console.log("[DOWNLOAD]", cleanUrl);
+    console.log("[DOWNLOAD REQUEST]", cleanUrl);
 
+    // إضافة User-Agent وهمي لتجنب حظر يوتيوب للسيرفرات
     const command =
       `yt-dlp --no-playlist --no-warnings --ignore-errors ` +
-      `--extractor-args "youtube:player_client=android" ` +
+      `--user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" ` +
       `--dump-json "${cleanUrl}"`;
 
     const { stdout } = await execAsync(command, {
@@ -106,44 +113,39 @@ app.post("/api/download", async (req, res) => {
       maxBuffer: 10 * 1024 * 1024,
     });
 
-    if (!stdout) throw new Error("Empty response");
+    if (!stdout) throw new Error("Could not fetch video info");
 
     let info;
     try {
       info = JSON.parse(stdout);
     } catch {
-      return res.status(500).json({ error: "yt-dlp parse error" });
+      return res.status(500).json({ error: "Failed to parse video data" });
     }
 
     const formats = [];
 
-    /* MP3 */
+    /* MP3 Logic */
     if (type === "mp3") {
       formats.push({
         type: "mp3",
         quality: "audio",
-        label: "Best Audio",
-        url: `/api/stream?url=${encodeURIComponent(
-          cleanUrl
-        )}&format=bestaudio/best&title=${encodeURIComponent(
-          info.title || "audio"
-        )}&ext=mp3`,
+        label: "Best Audio (MP3)",
+        url: `/api/stream?url=${encodeURIComponent(cleanUrl)}&format=bestaudio/best&title=${encodeURIComponent(info.title || "audio")}&ext=mp3`,
       });
-    }
-
-    /* VIDEO */
+    } 
+    /* VIDEO Logic */
     else {
-      const heights = [1080, 720, 480, 360];
+      // يفضل استخدام best لإرجاع رابط مباشر مدمج فيه الصوت والفيديو لسهولة الاستريم
+      const qualities = [
+        { q: "best", label: "High Quality" },
+        { q: "worst", label: "Low Quality" }
+      ];
 
-      for (const h of heights) {
+      for (const item of qualities) {
         formats.push({
-          quality: `${h}p`,
-          label: h >= 1080 ? "Full HD" : h >= 720 ? "HD" : "SD",
-          url: `/api/stream?url=${encodeURIComponent(
-            cleanUrl
-          )}&format=best&title=${encodeURIComponent(
-            info.title || "video"
-          )}&ext=mp4`,
+          quality: item.label,
+          label: item.label,
+          url: `/api/stream?url=${encodeURIComponent(cleanUrl)}&format=${item.q}&title=${encodeURIComponent(info.title || "video")}&ext=mp4`,
         });
       }
     }
@@ -159,7 +161,7 @@ app.post("/api/download", async (req, res) => {
   } catch (err) {
     console.error("[DOWNLOAD ERROR]", err.message);
     return res.status(500).json({
-      error: "Failed to process video",
+      error: "Server failed to process this video. YouTube might be blocking the request.",
       detail: err.message,
     });
   }
@@ -179,55 +181,55 @@ app.get("/api/stream", (req, res) => {
     }
 
     const safeTitle = sanitizeFilename(title || "download");
-    const safeExt = ["mp4", "mp3", "webm", "m4a"].includes(ext)
-      ? ext
-      : "mp4";
+    const safeExt = ["mp4", "mp3", "webm", "m4a"].includes(ext) ? ext : "mp4";
 
-    res.setHeader(
-      "Content-Disposition",
-      `attachment; filename="${safeTitle}.${safeExt}"`
-    );
+    // إعداد الرؤوس لإجبار المتصفح على التحميل
+    res.setHeader("Content-Disposition", `attachment; filename="${safeTitle}.${safeExt}"`);
+    res.setHeader("Content-Type", safeExt === "mp3" ? "audio/mpeg" : "video/mp4");
 
     const args = [
       "--no-playlist",
       "--no-warnings",
-      "--ignore-errors",
-      "-f",
-      format || "bv*+ba/b",
-      "-o",
-      "-",
+      "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      "-f", format || "best",
+      "-o", "-",
       decoded,
     ];
 
-    console.log("[STREAM]", args.join(" "));
+    console.log("[STREAMING START]", safeTitle);
 
     const ytdlp = spawn("yt-dlp", args);
 
     ytdlp.stdout.pipe(res);
 
     ytdlp.stderr.on("data", (d) => {
-      console.log("[yt-dlp]", d.toString());
+      // طباعة الأخطاء في الكونسول فقط لتتبع المشاكل
+      console.log("[yt-dlp log]", d.toString());
     });
 
     ytdlp.on("error", (err) => {
-      console.error("[STREAM ERROR]", err.message);
+      console.error("[SPAWN ERROR]", err.message);
       if (!res.headersSent) {
-        res.status(500).json({ error: "Stream failed" });
+        res.status(500).send("Streaming Error");
       }
     });
 
-    req.on("close", () => ytdlp.kill("SIGTERM"));
+    // إنهاء العملية عند إغلاق العميل للمتصفح
+    req.on("close", () => {
+      if (ytdlp) ytdlp.kill("SIGTERM");
+    });
+
   } catch (e) {
     console.error("[STREAM FATAL]", e);
-    res.status(500).json({ error: "Internal error" });
+    if (!res.headersSent) res.status(500).json({ error: "Internal error" });
   }
 });
 
 /* ================= HEALTH ================= */
 app.get("/api/health", (_req, res) => {
-  res.json({ status: "ok" });
+  res.json({ status: "ok", message: "Server is healthy" });
 });
 
 app.listen(PORT, () => {
-  console.log("🚀 Server running on", PORT);
+  console.log(`🚀 Server is running on port ${PORT}`);
 });
