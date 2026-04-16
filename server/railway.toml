@@ -1,0 +1,8 @@
+[build]
+builder = "railpack"
+
+[build.packages]
+nixpkgs = ["yt-dlp"]
+
+[deploy]
+startCommand = "node index.js"
