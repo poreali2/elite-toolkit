@@ -11,15 +11,18 @@ const execAsync = promisify(exec);
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+/* ================= IMPORTANT FIX (Railway / Proxy) ================= */
+app.set("trust proxy", 1);
+
 /* ================= CORS ================= */
 const ALLOWED_ORIGINS = [
   process.env.FRONTEND_URL || "http://localhost:8080",
-  "http://localhost:8080",
   "http://localhost:5173",
+  "http://localhost:8080",
   "https://elite-toolkit.vercel.app",
 ];
 
-/* ================= SUPPORTED ================= */
+/* ================= HOST VALIDATION ================= */
 const SUPPORTED_HOSTS = [
   "youtube.com",
   "www.youtube.com",
@@ -40,8 +43,7 @@ function isValidVideoUrl(url) {
 
     return SUPPORTED_HOSTS.some(
       (host) =>
-        parsed.hostname === host ||
-        parsed.hostname.endsWith("." + host)
+        parsed.hostname === host || parsed.hostname.endsWith("." + host)
     );
   } catch {
     return false;
@@ -49,18 +51,19 @@ function isValidVideoUrl(url) {
 }
 
 function sanitizeFilename(name) {
-  return name
-    .replace(/[^\w\s.\-]/g, "_")
-    .trim()
-    .slice(0, 200);
+  return name.replace(/[^\w\s.\-]/g, "_").trim().slice(0, 200);
 }
 
-/* ================= RATE LIMIT ================= */
+/* ================= RATE LIMIT (FIXED) ================= */
 const downloadLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 20,
+
   standardHeaders: true,
   legacyHeaders: false,
+
+  // 🔥 مهم جداً على Railway
+  keyGenerator: (req) => req.ip,
 });
 
 /* ================= MIDDLEWARE ================= */
@@ -70,8 +73,7 @@ app.use(
       if (!origin || ALLOWED_ORIGINS.includes(origin)) {
         callback(null, true);
       } else {
-        console.warn("CORS blocked:", origin);
-        callback(null, true);
+        callback(null, true); // ما نكسر الطلبات
       }
     },
     methods: ["GET", "POST"],
@@ -79,11 +81,9 @@ app.use(
   })
 );
 
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: "2mb" }));
 
-/* =====================================================
-   DOWNLOAD API
-===================================================== */
+/* ================= DOWNLOAD ================= */
 app.post("/api/download", downloadLimiter, async (req, res) => {
   const { url, type } = req.body;
 
@@ -100,7 +100,7 @@ app.post("/api/download", downloadLimiter, async (req, res) => {
   try {
     console.log("[DOWNLOAD]", cleanUrl);
 
-    /* ========= cookies (optional via env) ========= */
+    /* ===== cookies optional (safe) ===== */
     const cookiePath = "/tmp/cookies.txt";
 
     if (process.env.YT_COOKIES) {
@@ -111,31 +111,35 @@ app.post("/api/download", downloadLimiter, async (req, res) => {
       ? `--cookies ${cookiePath}`
       : "";
 
-    /* ========= yt-dlp metadata ========= */
-    const command = `yt-dlp ${cookieArg} --dump-json --no-playlist --no-warnings "${cleanUrl}"`;
+    /* ===== FIXED yt-dlp command ===== */
+    const command = `yt-dlp ${cookieArg} --dump-json --no-playlist --no-warnings --ignore-errors "${cleanUrl}"`;
 
     const { stdout } = await execAsync(command, {
       timeout: 60000,
       maxBuffer: 10 * 1024 * 1024,
     });
 
-    if (!stdout) throw new Error("Empty response");
+    if (!stdout) throw new Error("Empty response from yt-dlp");
 
     const info = JSON.parse(stdout);
 
     const formats = [];
 
-    /* ========= AUDIO ========= */
+    /* ================= MP3 ================= */
     if (type === "mp3") {
       formats.push({
         type: "mp3",
         quality: "audio",
         label: "Best Audio",
-        url: `/api/stream?url=${encodeURIComponent(cleanUrl)}&format=bestaudio&title=${encodeURIComponent(info.title || "audio")}&ext=mp3`,
+        url: `/api/stream?url=${encodeURIComponent(
+          cleanUrl
+        )}&format=bestaudio&title=${encodeURIComponent(
+          info.title || "audio"
+        )}&ext=mp3`,
       });
     }
 
-    /* ========= VIDEO ========= */
+    /* ================= VIDEO ================= */
     else {
       const targetHeights = [1080, 720, 480, 360];
 
@@ -153,8 +157,13 @@ app.post("/api/download", downloadLimiter, async (req, res) => {
         if (match) {
           formats.push({
             quality: `${h}p`,
-            label: h >= 1080 ? "Full HD" : h >= 720 ? "HD" : "SD",
-            url: `/api/stream?url=${encodeURIComponent(cleanUrl)}&format=bestvideo[height<=${h}]+bestaudio&title=${encodeURIComponent(info.title || "video")}&ext=mp4`,
+            label:
+              h >= 1080 ? "Full HD" : h >= 720 ? "HD" : "SD",
+            url: `/api/stream?url=${encodeURIComponent(
+              cleanUrl
+            )}&format=bestvideo[height<=${h}]+bestaudio&title=${encodeURIComponent(
+              info.title || "video"
+            )}&ext=mp4`,
           });
         }
       }
@@ -186,9 +195,7 @@ app.post("/api/download", downloadLimiter, async (req, res) => {
   }
 });
 
-/* =====================================================
-   STREAM API
-===================================================== */
+/* ================= STREAM ================= */
 app.get("/api/stream", async (req, res) => {
   const { url, format, title, ext } = req.query;
 
@@ -217,6 +224,7 @@ app.get("/api/stream", async (req, res) => {
     format || "best",
     "--no-playlist",
     "--no-warnings",
+    "--ignore-errors",
     "-o",
     "-",
     decodedUrl,
@@ -225,6 +233,10 @@ app.get("/api/stream", async (req, res) => {
   const ytdlp = spawn("yt-dlp", args);
 
   ytdlp.stdout.pipe(res);
+
+  ytdlp.stderr.on("data", (d) => {
+    console.error("[yt-dlp]", d.toString());
+  });
 
   ytdlp.on("error", (err) => {
     console.error("[STREAM ERROR]", err.message);
