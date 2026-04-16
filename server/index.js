@@ -8,7 +8,13 @@ import "dotenv/config";
 const execAsync = promisify(exec);
 const app = express();
 const PORT = process.env.PORT || 3001;
-const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:8080";
+
+const ALLOWED_ORIGINS = [
+  process.env.FRONTEND_URL || "http://localhost:8080",
+  "http://localhost:8080",
+  "http://localhost:5173",
+  "https://elite-toolkit.vercel.app",
+];
 
 const SUPPORTED_HOSTS = [
   "youtube.com",
@@ -51,7 +57,13 @@ const downloadLimiter = rateLimit({
 
 app.use(
   cors({
-    origin: FRONTEND_URL,
+    origin: (origin, callback) => {
+      if (!origin || ALLOWED_ORIGINS.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error(`CORS blocked: ${origin}`));
+      }
+    },
     methods: ["GET", "POST"],
     allowedHeaders: ["Content-Type"],
   })
