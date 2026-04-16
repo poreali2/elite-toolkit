@@ -113,10 +113,10 @@ app.post("/api/download", async (req, res) => {
 
     // بناء الأمر مع دعم الكوكيز و IPv4 لتجنب الحظر
     let command = `yt-dlp --no-playlist --no-warnings --ignore-errors --force-ipv4 --dump-json `;
-    
-    if (fs.existsSync(cookiesPath)) {
-      command += `--cookies "${cookiesPath}" `;
-    }
+command += `--extractor-args "youtube:player_client=android,web;host_language=en" `; // أضف هذا السطر
+if (fs.existsSync(cookiesPath)) {
+    command += `--cookies "${cookiesPath}" `;
+}
     
     command += `--user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" `;
     command += `"${cleanUrl}"`;
