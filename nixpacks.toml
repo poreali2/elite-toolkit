@@ -1,0 +1,11 @@
+[phases.setup]
+nixPkgs = ["nodejs", "python3", "ffmpeg"]
+
+[phases.install]
+cmds = ["pip3 install yt-dlp", "npm install"]
+
+[phases.build]
+cmds = ["npm run build"]
+
+[start]
+cmd = "node index.js"
