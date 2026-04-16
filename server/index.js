@@ -75,13 +75,22 @@ const downloadLimiter = rateLimit({
 /* ================= MIDDLEWARE ================= */
 app.use(
   cors({
-    origin: (origin, callback) => {
-      if (!origin || ALLOWED_ORIGINS.includes(origin)) {
+    origin: function (origin, callback) {
+      const allowed = [
+        "https://elite-toolkit.vercel.app",
+        "http://localhost:5173",
+        "http://localhost:8080",
+      ];
+
+      if (!origin || allowed.includes(origin)) {
         callback(null, true);
       } else {
-        callback(null, true);
+        callback(new Error("Not allowed by CORS"));
       }
     },
+    methods: ["GET", "POST", "OPTIONS"],
+    allowedHeaders: ["Content-Type"],
+    credentials: true,
   })
 );
 
